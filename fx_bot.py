@@ -9,6 +9,7 @@ from bs4 import BeautifulSoup
 from xml.etree import ElementTree as ET
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, CallbackQueryHandler
+import asyncio
 
 # Создаем директорию для логов если её нет
 if not os.path.exists('logs'):
