@@ -10,6 +10,7 @@ from xml.etree import ElementTree as ET
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, CallbackQueryHandler
 import asyncio
+from playwright.async_api import async_playwright
 
 # Создаем директорию для логов если её нет
 if not os.path.exists('logs'):
@@ -64,141 +65,138 @@ async def get_cbr_rates():
         return None
 
 async def get_investing_rate(pair: str):
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.9',
-        'Accept-Encoding': 'gzip, deflate, br',
-        'Connection': 'keep-alive',
-        'Cache-Control': 'no-cache',
-        'Pragma': 'no-cache',
-        'Upgrade-Insecure-Requests': '1',
-        'Sec-Fetch-Dest': 'document',
-        'Sec-Fetch-Mode': 'navigate',
-        'Sec-Fetch-Site': 'none',
-        'Sec-Fetch-User': '?1'
-    }
+    """Получает курс с Investing.com используя Playwright"""
     urls = {
         'USD/RUB': 'https://www.investing.com/currencies/usd-rub',
         'CNY/RUB': 'https://www.investing.com/currencies/cny-rub',
         'USD/CNY': 'https://www.investing.com/currencies/usd-cny',
     }
+    
+    if pair not in urls:
+        logger.error(f"Pair {pair} not supported by Investing.com")
+        return None
+    
     try:
         url = urls[pair]
         logger.info(f"Fetching {pair} from Investing.com URL: {url}")
-        session = requests.Session()
-        r = session.get(url, headers=headers, timeout=30)
-        logger.info(f"Investing.com response status: {r.status_code}")
-        logger.info(f"Investing.com response headers: {dict(r.headers)}")
         
-        r.raise_for_status()
-        soup = BeautifulSoup(r.text, get_parser())
-        
-        # Save response for debugging
-        with open(f'investing_{pair.replace("/", "_")}_response.html', 'w', encoding='utf-8') as f:
-            f.write(r.text)
-        
-        # Try multiple selectors
-        selectors = [
-            'div[data-test="instrument-price-last"]',
-            '[class*="text-5xl"]',
-            '#last_last',
-            '[class*="price"]',
-            '[class*="lastPrice"]'
-        ]
-        
-        for selector in selectors:
-            logger.info(f"Trying selector {selector}")
-            tags = soup.select(selector)
-            logger.info(f"Found {len(tags)} elements with selector {selector}")
+        async with async_playwright() as p:
+            # Запускаем браузер
+            browser = await p.firefox.launch(headless=True)
+            context = await browser.new_context()
+            page = await context.new_page()
             
-            for tag in tags:
-                try:
-                    text = tag.text.strip()
-                    logger.info(f"Found element with text: {text}")
-                    # Remove any non-numeric characters except dots and commas
-                    text = ''.join(c for c in text if c.isdigit() or c in '.,')
-                    rate = float(text.replace(',', '.'))
-                    logger.info(f"Successfully parsed rate {rate} from {text}")
+            try:
+                # Переходим на страницу с меньшим таймаутом
+                await page.goto(url, wait_until='domcontentloaded', timeout=10000)
+                
+                # Ждем загрузки цены с меньшим таймаутом
+                await page.wait_for_selector('div[data-test="instrument-price-last"]', timeout=5000)
+                
+                # Получаем элемент с ценой через JavaScript
+                price_text = await page.evaluate('''() => {
+                    const el = document.querySelector('div[data-test="instrument-price-last"]');
+                    return el ? el.textContent.trim() : null;
+                }''')
+                
+                if price_text:
+                    logger.info(f"Found price text: {price_text}")
+                    # Очищаем текст от всего кроме цифр, точек и запятых
+                    price_text = ''.join(c for c in price_text if c.isdigit() or c in '.,')
+                    rate = float(price_text.replace(',', '.'))
+                    logger.info(f"Successfully parsed rate {rate} from {price_text}")
                     return rate
-                except ValueError:
-                    continue
-        
-        logger.error(f"Could not find rate element for {pair} on Investing.com")
-        return None
-        
+                else:
+                    logger.error(f"Could not find price element for {pair} on Investing.com")
+                    return None
+                    
+            except Exception as e:
+                logger.error(f"Error while processing page for {pair} on Investing.com: {e}")
+                return None
+                
+            finally:
+                await browser.close()
+            
     except Exception as e:
-        logger.error(f"Error fetching Investing.com rate for {pair}: {e}")
-        if 'r' in locals():
-            logger.error(f"Response content: {r.text[:1000]}...")
+        logger.error(f"Critical error fetching Investing.com rate for {pair}: {e}")
         return None
 
 async def get_profinance_rate(pair: str):
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.9',
-        'Accept-Encoding': 'gzip, deflate, br',
-        'Connection': 'keep-alive',
-        'Cache-Control': 'no-cache',
-        'Pragma': 'no-cache',
-        'Upgrade-Insecure-Requests': '1'
-    }
+    """Получает курс с ProFinance используя Playwright"""
     urls = {
         'USD/RUB': 'https://www.profinance.ru/chart/usdrub/',
         'CNY/RUB': 'https://www.profinance.ru/chart/cnyrub/',
     }
-    try:
-        url = urls[pair]
-        logger.info(f"Fetching {pair} from Profinance URL: {url}")
-        session = requests.Session()
-        r = session.get(url, headers=headers, timeout=30)
-        logger.info(f"Profinance response status: {r.status_code}")
-        logger.info(f"Profinance response headers: {dict(r.headers)}")
-        
-        r.raise_for_status()
-        soup = BeautifulSoup(r.text, get_parser())
-        
-        # Save response for debugging
-        with open(f'profinance_{pair.replace("/", "_")}_response.html', 'w', encoding='utf-8') as f:
-            f.write(r.text)
-        
-        # Try different selectors
-        selectors = [
-            'span.price', 
-            '#last_last', 
-            '.price-large',
-            '#last',
-            '[class*="price"]',
-            '[id*="price"]',
-            '[class*="last"]',
-            '[id*="last"]'
-        ]
-        
-        for selector in selectors:
-            logger.info(f"Trying selector {selector}")
-            tags = soup.select(selector)
-            logger.info(f"Found {len(tags)} elements with selector {selector}")
-            
-            for tag in tags:
-                try:
-                    text = tag.text.strip()
-                    logger.info(f"Found element with text: {text}")
-                    # Remove any non-numeric characters except dots and commas
-                    text = ''.join(c for c in text if c.isdigit() or c in '.,')
-                    rate = float(text.replace(',', '.'))
-                    logger.info(f"Successfully parsed rate {rate} from {text}")
-                    return rate
-                except ValueError:
-                    continue
-        
-        logger.error(f"Could not find rate element for {pair} on Profinance")
+    
+    if pair not in urls:
+        logger.error(f"Pair {pair} not supported by ProFinance")
         return None
         
+    try:
+        url = urls[pair]
+        logger.info(f"Fetching {pair} from ProFinance URL: {url}")
+        
+        async with async_playwright() as p:
+            # Запускаем браузер с меньшим таймаутом
+            browser = await p.firefox.launch(headless=True)
+            context = await browser.new_context()
+            page = await context.new_page()
+            
+            try:
+                # Переходим на страницу с меньшим таймаутом
+                await page.goto(url, wait_until='domcontentloaded', timeout=10000)
+                
+                # Пробуем разные селекторы с меньшим таймаутом
+                selectors = [
+                    '#last', 
+                    '.price-large',
+                    '.price',
+                    '.last',
+                    '#last_last'
+                ]
+                
+                for selector in selectors:
+                    try:
+                        logger.info(f"Trying selector {selector}")
+                        # Ждем появления элемента не более 5 секунд
+                        await page.wait_for_selector(selector, timeout=5000)
+                        
+                        # Получаем цену через JavaScript
+                        price_text = await page.evaluate(f'''() => {{
+                            const elements = document.querySelectorAll('{selector}');
+                            for (const el of elements) {{
+                                const text = el.textContent.trim();
+                                if (/^[0-9.,]+$/.test(text)) {{
+                                    return text;
+                                }}
+                            }}
+                            return null;
+                        }}''')
+                        
+                        if price_text:
+                            logger.info(f"Found price text with selector {selector}: {price_text}")
+                            # Очищаем текст от всего кроме цифр, точек и запятых
+                            price_text = ''.join(c for c in price_text if c.isdigit() or c in '.,')
+                            rate = float(price_text.replace(',', '.'))
+                            logger.info(f"Successfully parsed rate {rate} from {price_text}")
+                            return rate
+                            
+                    except Exception as e:
+                        logger.info(f"Selector {selector} failed: {e}")
+                        continue
+                
+                logger.error(f"Could not find valid price element for {pair} on ProFinance")
+                return None
+                    
+            except Exception as e:
+                logger.error(f"Error while processing page for {pair} on ProFinance: {e}")
+                return None
+                
+            finally:
+                await browser.close()
+            
     except Exception as e:
-        logger.error(f"Error fetching Profinance rate for {pair}: {e}")
-        if 'r' in locals():
-            logger.error(f"Response content: {r.text[:1000]}...")
+        logger.error(f"Critical error fetching ProFinance rate for {pair}: {e}")
         return None
 
 # --- BOT LOGIC ---
